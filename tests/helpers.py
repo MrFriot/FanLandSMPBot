@@ -4,10 +4,12 @@
 а ответы Minecraft-сервера — методом set_server().
 """
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 
+from bot import timefmt
 from bot.config import Config
 from bot.monitor import ServerMonitor
 from bot.sessions import SessionStorage
@@ -118,3 +120,8 @@ def set_server(monitor: ServerMonitor, *, status, names) -> None:
 
     monitor.get_status = get_status
     monitor.get_query = get_query
+
+
+def msk(year: int, month: int, day: int, hour: int = 0, minute: int = 0) -> int:
+    """Unix-время момента, заданного по МСК. Для читаемых тестов."""
+    return int(datetime(year, month, day, hour, minute, tzinfo=timefmt.MSK).timestamp())

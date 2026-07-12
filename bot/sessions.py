@@ -16,6 +16,7 @@
 с реальным составом и закрывает расхождения текущим временем.
 """
 import sqlite3
+from dataclasses import dataclass
 from pathlib import Path
 
 _SCHEMA = """
@@ -32,6 +33,23 @@ CREATE INDEX IF NOT EXISTS idx_sessions_name ON sessions (name);
 CREATE UNIQUE INDEX IF NOT EXISTS idx_sessions_open
     ON sessions (name) WHERE left_at IS NULL;
 """
+
+
+@dataclass(frozen=True)
+class PlayerStats:
+    """Сводка по игроку за всё время наблюдений."""
+    first_seen: int       # unix-время первого захода
+    sessions_count: int
+    total_seconds: int    # открытая сессия считается до now
+    longest_seconds: int
+
+
+@dataclass(frozen=True)
+class WindowStats:
+    """Сводка по серверу на отрезке времени."""
+    unique_players: int
+    sessions: int         # сессии, пересекающиеся с отрезком
+    total_seconds: int
 
 
 class SessionStorage:
@@ -141,6 +159,79 @@ class SessionStorage:
             {"since": since, "until": until, "limit": limit},
         )
         return [(name, total) for name, total in rows]
+
+    def player_stats(self, name: str, now: int) -> PlayerStats | None:
+        """Сводка по игроку; None, если игрок ни разу не появлялся."""
+        row = self._db.execute(
+            "SELECT MIN(joined_at), COUNT(*),"
+            " SUM(COALESCE(left_at, :now) - joined_at),"
+            " MAX(COALESCE(left_at, :now) - joined_at)"
+            " FROM sessions WHERE name = :name",
+            {"name": name, "now": now},
+        ).fetchone()
+        if row[1] == 0:
+            return None
+        return PlayerStats(
+            first_seen=row[0],
+            sessions_count=row[1],
+            total_seconds=row[2],
+            longest_seconds=row[3],
+        )
+
+    def window_stats(self, since: int, until: int) -> WindowStats:
+        """Сводка по всем игрокам на отрезке [since, until].
+
+        Учитываются сессии, пересекающиеся с отрезком; их длительность
+        обрезается по его границам, открытые считаются до until.
+        """
+        row = self._db.execute(
+            """
+            SELECT COUNT(DISTINCT name),
+                   COUNT(*),
+                   COALESCE(SUM(MAX(0, MIN(COALESCE(left_at, :until), :until)
+                                       - MAX(joined_at, :since))), 0)
+            FROM sessions
+            WHERE joined_at < :until AND COALESCE(left_at, :until) > :since
+            """,
+            {"since": since, "until": until},
+        ).fetchone()
+        return WindowStats(unique_players=row[0], sessions=row[1], total_seconds=row[2])
+
+    def first_record(self) -> int | None:
+        """Время самого первого захода в истории; None, если история пуста."""
+        row = self._db.execute("SELECT MIN(joined_at) FROM sessions").fetchone()
+        return row[0]
+
+    def peak_online(self, since: int, until: int) -> tuple[int, int] | None:
+        """Пиковый одновременный онлайн на отрезке: (игроков, когда).
+
+        None, если на отрезке не было ни одной сессии. При выходе и входе
+        в один и тот же момент выход учитывается первым, чтобы «смена
+        состава» в один тик не завышала пик.
+        """
+        rows = self._db.execute(
+            "SELECT MAX(joined_at, :since), MIN(COALESCE(left_at, :until), :until)"
+            " FROM sessions"
+            " WHERE joined_at < :until AND COALESCE(left_at, :until) > :since",
+            {"since": since, "until": until},
+        ).fetchall()
+
+        events = []
+        for start, end in rows:
+            if end > start:
+                events.append((start, 1))
+                events.append((end, -1))
+        if not events:
+            return None
+
+        events.sort()  # при равном времени -1 идёт раньше +1
+        current = peak = 0
+        peak_at = events[0][0]
+        for at, delta in events:
+            current += delta
+            if current > peak:
+                peak, peak_at = current, at
+        return peak, peak_at
 
     def playtime(self, name: str, since: int, until: int) -> int:
         """Суммарные секунды в игре на отрезке [since, until].

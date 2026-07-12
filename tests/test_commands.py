@@ -4,7 +4,16 @@ from aiogram.filters import CommandObject
 
 from bot.handlers import commands
 
-from .helpers import FakeBot, FakeMessage, FakeStatus, make_monitor, make_sessions, make_storage, set_server
+from .helpers import (
+    FakeBot,
+    FakeMessage,
+    FakeStatus,
+    make_monitor,
+    make_sessions,
+    make_storage,
+    msk,
+    set_server,
+)
 
 
 class CommandsTestCase(unittest.IsolatedAsyncioTestCase):
@@ -155,26 +164,58 @@ class TestSeen(SessionsCommandsTestCase):
         self.assertEqual(msg.answers[-1], "Не видел игрока Nobody на сервере.")
 
     async def test_player_online_now(self):
-        self.sessions.open_session("Steve", at=1000)
-        self.freeze_now(1000 + 3600)
+        self.sessions.open_session("Steve", at=msk(2026, 7, 12, 18, 0))
+        self.freeze_now(msk(2026, 7, 12, 19, 0))
 
         msg = FakeMessage(1)
         await commands.cmd_seen(msg, CommandObject(args="Steve"), self.sessions)
         self.assertEqual(
             msg.answers[-1],
-            "🟢 Steve сейчас на сервере, зашёл 1 ч назад.",
+            "🟢 Steve сейчас на сервере, зашёл сегодня в 18:00.\n"
+            "\n"
+            "Заходов: 1\n"
+            "Наиграно всего: 1 ч\n"
+            "За последние 7 дн: 1 ч\n"
+            "Самая долгая сессия: 1 ч\n"
+            "Впервые замечен: сегодня в 18:00",
         )
 
     async def test_player_offline(self):
-        self.sessions.open_session("Steve", at=1000)
-        self.sessions.close_session("Steve", at=1000 + 1800)
-        self.freeze_now(1000 + 1800 + 2 * 3600)
+        self.sessions.open_session("Steve", at=msk(2026, 7, 11, 23, 0))
+        self.sessions.close_session("Steve", at=msk(2026, 7, 11, 23, 30))
+        self.freeze_now(msk(2026, 7, 12, 10, 0))
 
         msg = FakeMessage(1)
         await commands.cmd_seen(msg, CommandObject(args="Steve"), self.sessions)
         self.assertEqual(
             msg.answers[-1],
-            "⚪ Steve был на сервере 2 ч назад, сессия длилась 30 мин.",
+            "⚪ Steve был на сервере вчера в 23:30, сессия длилась 30 мин.\n"
+            "\n"
+            "Заходов: 1\n"
+            "Наиграно всего: 30 мин\n"
+            "За последние 7 дн: 30 мин\n"
+            "Самая долгая сессия: 30 мин\n"
+            "Впервые замечен: вчера в 23:00",
+        )
+
+    async def test_aggregates_over_multiple_sessions(self):
+        self.sessions.open_session("Steve", at=msk(2026, 7, 10, 12, 0))
+        self.sessions.close_session("Steve", at=msk(2026, 7, 10, 13, 0))   # 1 ч
+        self.sessions.open_session("Steve", at=msk(2026, 7, 12, 9, 0))
+        self.sessions.close_session("Steve", at=msk(2026, 7, 12, 9, 30))   # 30 мин
+        self.freeze_now(msk(2026, 7, 12, 12, 0))
+
+        msg = FakeMessage(1)
+        await commands.cmd_seen(msg, CommandObject(args="Steve"), self.sessions)
+        self.assertEqual(
+            msg.answers[-1],
+            "⚪ Steve был на сервере сегодня в 09:30, сессия длилась 30 мин.\n"
+            "\n"
+            "Заходов: 2\n"
+            "Наиграно всего: 1 ч 30 мин\n"
+            "За последние 7 дн: 1 ч 30 мин\n"
+            "Самая долгая сессия: 1 ч\n"
+            "Впервые замечен: 10 июля в 12:00",
         )
 
     async def test_seen_is_case_sensitive(self):
@@ -185,7 +226,7 @@ class TestSeen(SessionsCommandsTestCase):
 
 
 class TestTop(SessionsCommandsTestCase):
-    NOW = 1_000_000
+    NOW = 100 * 86400  # достаточно большое, чтобы «30 дней назад» не ушло в минус
 
     def seed(self):
         # Steve: 3 часа за последние сутки; Alex: 30 минут; Old: за пределами недели
@@ -227,3 +268,62 @@ class TestTop(SessionsCommandsTestCase):
         msg = FakeMessage(1)
         await commands.cmd_top(msg, CommandObject(), self.sessions)
         self.assertEqual(msg.answers[-1], "За последние 7 дн на сервере никого не было.")
+
+
+class TestStats(SessionsCommandsTestCase):
+    NOW = 100 * 86400  # достаточно большое, чтобы «30 дней назад» не ушло в минус
+
+    async def test_full_report(self):
+        now = msk(2026, 7, 12, 20, 0)
+        # Steve: 3 ч, закончил час назад; Alex: онлайн 30 мин; Old: месяц назад
+        self.sessions.open_session("Steve", at=msk(2026, 7, 12, 16, 0))
+        self.sessions.close_session("Steve", at=msk(2026, 7, 12, 19, 0))
+        self.sessions.open_session("Alex", at=msk(2026, 7, 12, 19, 30))
+        self.sessions.open_session("Old", at=msk(2026, 6, 12, 10, 0))
+        self.sessions.close_session("Old", at=msk(2026, 6, 13, 10, 0))
+        self.freeze_now(now)
+
+        msg = FakeMessage(1)
+        await commands.cmd_stats(msg, CommandObject(), self.sessions)
+        self.assertEqual(
+            msg.answers[-1],
+            "📊 Статистика сервера за 7 дн\n"
+            "\n"
+            "Сейчас онлайн: 1\n"
+            "Уникальных игроков: 2\n"
+            "Заходов: 2\n"
+            "Наиграно суммарно: 3 ч 30 мин\n"
+            "Пиковый онлайн: 1 (сегодня в 16:00)\n"
+            "Самый активный: Steve — 3 ч\n"
+            "\n"
+            "За всё время\n"
+            "Уникальных игроков: 3\n"
+            "Наиграно: 1 дн 3 ч\n"
+            "Первая запись: 12 июня в 10:00",
+        )
+
+    async def test_window_without_activity(self):
+        self.sessions.open_session("Old", at=self.NOW - 30 * 86400)
+        self.sessions.close_session("Old", at=self.NOW - 29 * 86400)
+        self.freeze_now(self.NOW)
+
+        msg = FakeMessage(1)
+        await commands.cmd_stats(msg, CommandObject(), self.sessions)
+        answer = msg.answers[-1]
+        self.assertIn("Уникальных игроков: 0", answer)
+        self.assertNotIn("Пиковый онлайн", answer)
+        self.assertNotIn("Самый активный", answer)
+        self.assertIn("За всё время", answer)
+
+    async def test_empty_history(self):
+        self.freeze_now(self.NOW)
+        msg = FakeMessage(1)
+        await commands.cmd_stats(msg, CommandObject(), self.sessions)
+        self.assertEqual(msg.answers[-1], "Пока нет ни одной записи об игроках.")
+
+    async def test_invalid_argument(self):
+        self.freeze_now(self.NOW)
+        msg = FakeMessage(1)
+        for bad in ("abc", "0", "400"):
+            await commands.cmd_stats(msg, CommandObject(args=bad), self.sessions)
+            self.assertIn("Использование: /stats", msg.answers[-1])

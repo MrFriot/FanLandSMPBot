@@ -194,3 +194,80 @@ class TestTopPlaytime(unittest.TestCase):
 
         top = s.top_playtime(since=0, until=1000, limit=2)
         self.assertEqual(top, [("P4", 500), ("P3", 400)])
+
+
+class TestPlayerStats(unittest.TestCase):
+    def test_unknown_player(self):
+        s = make_sessions()
+        self.assertIsNone(s.player_stats("Nobody", now=100))
+
+    def test_aggregates(self):
+        s = make_sessions()
+        s.open_session("Steve", at=100)
+        s.close_session("Steve", at=700)     # 600 c
+        s.open_session("Steve", at=1000)     # открыта, к now=1300 набегает 300 c
+
+        stats = s.player_stats("Steve", now=1300)
+        self.assertEqual(stats.first_seen, 100)
+        self.assertEqual(stats.sessions_count, 2)
+        self.assertEqual(stats.total_seconds, 900)
+        self.assertEqual(stats.longest_seconds, 600)
+
+
+class TestWindowStats(unittest.TestCase):
+    def test_counts_and_clamping(self):
+        s = make_sessions()
+        s.open_session("Steve", at=100)
+        s.close_session("Steve", at=700)
+        s.open_session("Alex", at=900)       # открыта — до until
+        s.open_session("Old", at=10)
+        s.close_session("Old", at=50)        # целиком до окна
+
+        stats = s.window_stats(since=400, until=1000)
+        self.assertEqual(stats.unique_players, 2)
+        self.assertEqual(stats.sessions, 2)
+        # Steve: 700-400=300; Alex: 1000-900=100
+        self.assertEqual(stats.total_seconds, 400)
+
+    def test_empty_window(self):
+        s = make_sessions()
+        stats = s.window_stats(since=0, until=100)
+        self.assertEqual(stats, type(stats)(unique_players=0, sessions=0, total_seconds=0))
+
+
+class TestFirstRecord(unittest.TestCase):
+    def test_first_record(self):
+        s = make_sessions()
+        self.assertIsNone(s.first_record())
+        s.open_session("Alex", at=500)
+        s.open_session("Steve", at=100)
+        self.assertEqual(s.first_record(), 100)
+
+
+class TestPeakOnline(unittest.TestCase):
+    def test_peak_and_timestamp(self):
+        s = make_sessions()
+        s.open_session("A", at=100); s.close_session("A", at=200)
+        s.open_session("B", at=150); s.close_session("B", at=300)
+        s.open_session("C", at=180); s.close_session("C", at=190)
+
+        self.assertEqual(s.peak_online(since=0, until=1000), (3, 180))
+
+    def test_swap_at_same_moment_is_not_double_counted(self):
+        s = make_sessions()
+        s.open_session("A", at=0); s.close_session("A", at=100)
+        s.open_session("B", at=100); s.close_session("B", at=200)
+
+        self.assertEqual(s.peak_online(since=0, until=1000), (1, 0))
+
+    def test_open_session_and_window_clamp(self):
+        s = make_sessions()
+        s.open_session("A", at=50)  # открыта; в окно попадает с since
+        self.assertEqual(s.peak_online(since=100, until=500), (1, 100))
+
+    def test_no_sessions_in_window(self):
+        s = make_sessions()
+        s.open_session("Old", at=10)
+        s.close_session("Old", at=50)
+        self.assertIsNone(s.peak_online(since=100, until=200))
+        self.assertIsNone(make_sessions().peak_online(since=0, until=100))

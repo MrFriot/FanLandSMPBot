@@ -55,6 +55,7 @@ async def cmd_start(message: Message, storage: SubscriberStorage) -> None:
             "/untrack <ник> — перестать следить\n"
             "/seen <ник> — когда игрок был на сервере\n"
             "/top [дней] — топ по времени в игре\n"
+            "/stats [дней] — статистика сервера\n"
             "/stop — отписаться от уведомлений о сервере",
         )
     else:
@@ -198,18 +199,28 @@ async def cmd_seen(message: Message, command: CommandObject, sessions: SessionSt
         await _answer(message, f"Не видел игрока {name} на сервере.")
         return
 
+    now = _now()
     joined_at, left_at = seen
     if left_at is None:
-        await _answer(
-            message,
-            f"🟢 {name} сейчас на сервере, зашёл {timefmt.duration(_now() - joined_at)} назад.",
-        )
+        head = f"🟢 {name} сейчас на сервере, зашёл {timefmt.moment(joined_at, now)}."
     else:
-        await _answer(
-            message,
-            f"⚪ {name} был на сервере {timefmt.duration(_now() - left_at)} назад, "
-            f"сессия длилась {timefmt.duration(left_at - joined_at)}.",
+        head = (
+            f"⚪ {name} был на сервере {timefmt.moment(left_at, now)}, "
+            f"сессия длилась {timefmt.duration(left_at - joined_at)}."
         )
+
+    # игрок найден last_seen-ом, значит сводка по нему точно есть
+    stats = sessions.player_stats(name, now)
+    week = sessions.playtime(name, since=now - 7 * 86400, until=now)
+    await _answer(message, "\n".join([
+        head,
+        "",
+        f"Заходов: {stats.sessions_count}",
+        f"Наиграно всего: {timefmt.duration(stats.total_seconds)}",
+        f"За последние 7 дн: {timefmt.duration(week)}",
+        f"Самая долгая сессия: {timefmt.duration(stats.longest_seconds)}",
+        f"Впервые замечен: {timefmt.moment(stats.first_seen, now)}",
+    ]))
 
 
 @router.message(Command("top"))
@@ -232,5 +243,53 @@ async def cmd_top(message: Message, command: CommandObject, sessions: SessionSto
     lines += [
         f"{place}. {name} — {timefmt.duration(seconds)}"
         for place, (name, seconds) in enumerate(top, start=1)
+    ]
+    await _answer(message, "\n".join(lines))
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, command: CommandObject, sessions: SessionStorage) -> None:
+    days = 7
+    if command.args:
+        arg = command.args.split()[0]
+        if not arg.isdigit() or not 1 <= int(arg) <= 365:
+            await _answer(message, "Использование: /stats [дней], число от 1 до 365. По умолчанию 7.")
+            return
+        days = int(arg)
+
+    now = _now()
+    first = sessions.first_record()
+    if first is None:
+        await _answer(message, "Пока нет ни одной записи об игроках.")
+        return
+
+    since = now - days * 86400
+    window = sessions.window_stats(since, now)
+    lines = [
+        f"📊 Статистика сервера за {days} дн",
+        "",
+        f"Сейчас онлайн: {len(sessions.online_now())}",
+        f"Уникальных игроков: {window.unique_players}",
+        f"Заходов: {window.sessions}",
+        f"Наиграно суммарно: {timefmt.duration(window.total_seconds)}",
+    ]
+
+    peak = sessions.peak_online(since, now)
+    if peak is not None:
+        count, at = peak
+        lines.append(f"Пиковый онлайн: {count} ({timefmt.moment(at, now)})")
+
+    top = sessions.top_playtime(since, now, limit=1)
+    if top:
+        best_name, best_seconds = top[0]
+        lines.append(f"Самый активный: {best_name} — {timefmt.duration(best_seconds)}")
+
+    alltime = sessions.window_stats(0, now)
+    lines += [
+        "",
+        "За всё время",
+        f"Уникальных игроков: {alltime.unique_players}",
+        f"Наиграно: {timefmt.duration(alltime.total_seconds)}",
+        f"Первая запись: {timefmt.moment(first, now)}",
     ]
     await _answer(message, "\n".join(lines))
