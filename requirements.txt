@@ -1,3 +1,4 @@
 aiogram>=3.23,<4
 mcstatus>=12,<14
 python-dotenv>=1.0
+matplotlib>=3.10

@@ -3,15 +3,16 @@
 Аргументы storage и monitor попадают в хендлеры через DI aiogram:
 они переданы как kwargs в dp.start_polling() (см. main.py).
 """
+import asyncio
 import logging
 import re
 import time
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
-from .. import timefmt
+from .. import charts, reports, timefmt
 from ..monitor import ServerMonitor
 from ..sessions import SessionStorage
 from ..storage import Subscriber, SubscriberStorage
@@ -53,9 +54,9 @@ async def cmd_start(message: Message, storage: SubscriberStorage) -> None:
             "/status — текущее состояние сервера\n"
             "/track <ник> — следить за входом/выходом игрока\n"
             "/untrack <ник> — перестать следить\n"
-            "/seen <ник> — когда игрок был на сервере\n"
+            "/seen <ник> — профиль игрока\n"
             "/top [дней] — топ по времени в игре\n"
-            "/stats [дней] — статистика сервера\n"
+            "/stats [дней] — дашборд сервера\n"
             "/stop — отписаться от уведомлений о сервере",
         )
     else:
@@ -194,33 +195,11 @@ async def cmd_seen(message: Message, command: CommandObject, sessions: SessionSt
         await _answer(message, "Не похоже на ник Minecraft: " + name)
         return
 
-    seen = sessions.last_seen(name)
-    if seen is None:
+    profile = reports.player_profile(sessions, name, _now())
+    if profile is None:
         await _answer(message, f"Не видел игрока {name} на сервере.")
         return
-
-    now = _now()
-    joined_at, left_at = seen
-    if left_at is None:
-        head = f"🟢 {name} сейчас на сервере, зашёл {timefmt.moment(joined_at, now)}."
-    else:
-        head = (
-            f"⚪ {name} был на сервере {timefmt.moment(left_at, now)}, "
-            f"сессия длилась {timefmt.duration(left_at - joined_at)}."
-        )
-
-    # игрок найден last_seen-ом, значит сводка по нему точно есть
-    stats = sessions.player_stats(name, now)
-    week = sessions.playtime(name, since=now - 7 * 86400, until=now)
-    await _answer(message, "\n".join([
-        head,
-        "",
-        f"Заходов: {stats.sessions_count}",
-        f"Наиграно всего: {timefmt.duration(stats.total_seconds)}",
-        f"За последние 7 дн: {timefmt.duration(week)}",
-        f"Самая долгая сессия: {timefmt.duration(stats.longest_seconds)}",
-        f"Впервые замечен: {timefmt.moment(stats.first_seen, now)}",
-    ]))
+    await _answer(message, profile)
 
 
 @router.message(Command("top"))
@@ -258,38 +237,22 @@ async def cmd_stats(message: Message, command: CommandObject, sessions: SessionS
         days = int(arg)
 
     now = _now()
-    first = sessions.first_record()
-    if first is None:
-        await _answer(message, "Пока нет ни одной записи об игроках.")
+    # запросы к SQLite — только из потока, где создано соединение
+    data = charts.collect(sessions, days, now)
+    png = None
+    if data is not None:
+        try:
+            # рендер CPU-bound и БД не трогает — уводим из event loop
+            png = await asyncio.to_thread(charts.render, data)
+        except Exception:
+            logger.exception("Не удалось отрисовать дашборд, отвечаю текстом")
+
+    if png is None:
+        # истории ещё нет или рендер упал — текстовый дашборд
+        await _answer(message, reports.server_dashboard(sessions, days, now))
         return
 
-    since = now - days * 86400
-    window = sessions.window_stats(since, now)
-    lines = [
-        f"📊 Статистика сервера за {days} дн",
-        "",
-        f"Сейчас онлайн: {len(sessions.online_now())}",
-        f"Уникальных игроков: {window.unique_players}",
-        f"Заходов: {window.sessions}",
-        f"Наиграно суммарно: {timefmt.duration(window.total_seconds)}",
-    ]
-
-    peak = sessions.peak_online(since, now)
-    if peak is not None:
-        count, at = peak
-        lines.append(f"Пиковый онлайн: {count} ({timefmt.moment(at, now)})")
-
-    top = sessions.top_playtime(since, now, limit=1)
-    if top:
-        best_name, best_seconds = top[0]
-        lines.append(f"Самый активный: {best_name} — {timefmt.duration(best_seconds)}")
-
-    alltime = sessions.window_stats(0, now)
-    lines += [
-        "",
-        "За всё время",
-        f"Уникальных игроков: {alltime.unique_players}",
-        f"Наиграно: {timefmt.duration(alltime.total_seconds)}",
-        f"Первая запись: {timefmt.moment(first, now)}",
-    ]
-    await _answer(message, "\n".join(lines))
+    await message.answer_photo(
+        BufferedInputFile(png, filename="stats.png"),
+        caption=f"📊 Дашборд сервера за {days} дн",
+    )

@@ -77,9 +77,13 @@ class FakeMessage:
         self.message_thread_id = thread_id
         self.is_topic_message = thread_id is not None
         self.answers: list[str] = []
+        self.photos: list[tuple] = []  # (BufferedInputFile, caption)
 
     async def answer(self, text, **kwargs):
         self.answers.append(text)
+
+    async def answer_photo(self, photo, caption=None, **kwargs):
+        self.photos.append((photo, caption))
 
 
 def make_db_path() -> str:

@@ -202,6 +202,37 @@ class SessionStorage:
         row = self._db.execute("SELECT MIN(joined_at) FROM sessions").fetchone()
         return row[0]
 
+    def spans_between(self, since: int, until: int) -> list[tuple[int, int]]:
+        """Отрезки присутствия игроков, обрезанные по [since, until].
+
+        Открытые сессии считаются до until. Имена не возвращаются —
+        отрезки нужны для агрегатов: пиковый онлайн, активность по часам.
+        """
+        rows = self._db.execute(
+            "SELECT MAX(joined_at, :since), MIN(COALESCE(left_at, :until), :until)"
+            " FROM sessions"
+            " WHERE joined_at < :until AND COALESCE(left_at, :until) > :since",
+            {"since": since, "until": until},
+        )
+        return [(start, end) for start, end in rows if end > start]
+
+    def recent_sessions(self, name: str, limit: int = 5) -> list[tuple[int, int | None]]:
+        """Последние сессии игрока, новые первыми: (joined_at, left_at)."""
+        rows = self._db.execute(
+            "SELECT joined_at, left_at FROM sessions"
+            " WHERE name = ? ORDER BY joined_at DESC, id DESC LIMIT ?",
+            (name, limit),
+        )
+        return [(joined, left) for joined, left in rows]
+
+    def join_times(self, name: str) -> list[int]:
+        """Времена всех заходов игрока (для анализа привычек)."""
+        rows = self._db.execute(
+            "SELECT joined_at FROM sessions WHERE name = ? ORDER BY joined_at",
+            (name,),
+        )
+        return [t for (t,) in rows]
+
     def peak_online(self, since: int, until: int) -> tuple[int, int] | None:
         """Пиковый одновременный онлайн на отрезке: (игроков, когда).
 
@@ -209,18 +240,10 @@ class SessionStorage:
         в один и тот же момент выход учитывается первым, чтобы «смена
         состава» в один тик не завышала пик.
         """
-        rows = self._db.execute(
-            "SELECT MAX(joined_at, :since), MIN(COALESCE(left_at, :until), :until)"
-            " FROM sessions"
-            " WHERE joined_at < :until AND COALESCE(left_at, :until) > :since",
-            {"since": since, "until": until},
-        ).fetchall()
-
         events = []
-        for start, end in rows:
-            if end > start:
-                events.append((start, 1))
-                events.append((end, -1))
+        for start, end in self.spans_between(since, until):
+            events.append((start, 1))
+            events.append((end, -1))
         if not events:
             return None
 

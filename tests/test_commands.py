@@ -2,6 +2,7 @@ import unittest
 
 from aiogram.filters import CommandObject
 
+from bot import reports
 from bot.handlers import commands
 
 from .helpers import (
@@ -163,60 +164,16 @@ class TestSeen(SessionsCommandsTestCase):
         await commands.cmd_seen(msg, CommandObject(args="Nobody"), self.sessions)
         self.assertEqual(msg.answers[-1], "Не видел игрока Nobody на сервере.")
 
-    async def test_player_online_now(self):
+    async def test_returns_full_profile(self):
         self.sessions.open_session("Steve", at=msk(2026, 7, 12, 18, 0))
-        self.freeze_now(msk(2026, 7, 12, 19, 0))
+        now = msk(2026, 7, 12, 19, 0)
+        self.freeze_now(now)
 
         msg = FakeMessage(1)
         await commands.cmd_seen(msg, CommandObject(args="Steve"), self.sessions)
-        self.assertEqual(
-            msg.answers[-1],
-            "🟢 Steve сейчас на сервере, зашёл сегодня в 18:00.\n"
-            "\n"
-            "Заходов: 1\n"
-            "Наиграно всего: 1 ч\n"
-            "За последние 7 дн: 1 ч\n"
-            "Самая долгая сессия: 1 ч\n"
-            "Впервые замечен: сегодня в 18:00",
-        )
-
-    async def test_player_offline(self):
-        self.sessions.open_session("Steve", at=msk(2026, 7, 11, 23, 0))
-        self.sessions.close_session("Steve", at=msk(2026, 7, 11, 23, 30))
-        self.freeze_now(msk(2026, 7, 12, 10, 0))
-
-        msg = FakeMessage(1)
-        await commands.cmd_seen(msg, CommandObject(args="Steve"), self.sessions)
-        self.assertEqual(
-            msg.answers[-1],
-            "⚪ Steve был на сервере вчера в 23:30, сессия длилась 30 мин.\n"
-            "\n"
-            "Заходов: 1\n"
-            "Наиграно всего: 30 мин\n"
-            "За последние 7 дн: 30 мин\n"
-            "Самая долгая сессия: 30 мин\n"
-            "Впервые замечен: вчера в 23:00",
-        )
-
-    async def test_aggregates_over_multiple_sessions(self):
-        self.sessions.open_session("Steve", at=msk(2026, 7, 10, 12, 0))
-        self.sessions.close_session("Steve", at=msk(2026, 7, 10, 13, 0))   # 1 ч
-        self.sessions.open_session("Steve", at=msk(2026, 7, 12, 9, 0))
-        self.sessions.close_session("Steve", at=msk(2026, 7, 12, 9, 30))   # 30 мин
-        self.freeze_now(msk(2026, 7, 12, 12, 0))
-
-        msg = FakeMessage(1)
-        await commands.cmd_seen(msg, CommandObject(args="Steve"), self.sessions)
-        self.assertEqual(
-            msg.answers[-1],
-            "⚪ Steve был на сервере сегодня в 09:30, сессия длилась 30 мин.\n"
-            "\n"
-            "Заходов: 2\n"
-            "Наиграно всего: 1 ч 30 мин\n"
-            "За последние 7 дн: 1 ч 30 мин\n"
-            "Самая долгая сессия: 1 ч\n"
-            "Впервые замечен: 10 июля в 12:00",
-        )
+        self.assertEqual(msg.answers[-1], reports.player_profile(self.sessions, "Steve", now))
+        self.assertIn("🟢 Steve сейчас на сервере, зашёл сегодня в 18:00.", msg.answers[-1])
+        self.assertIn("Последние сессии:", msg.answers[-1])
 
     async def test_seen_is_case_sensitive(self):
         self.sessions.open_session("Steve", at=1000)
@@ -271,59 +228,45 @@ class TestTop(SessionsCommandsTestCase):
 
 
 class TestStats(SessionsCommandsTestCase):
-    NOW = 100 * 86400  # достаточно большое, чтобы «30 дней назад» не ушло в минус
-
-    async def test_full_report(self):
-        now = msk(2026, 7, 12, 20, 0)
-        # Steve: 3 ч, закончил час назад; Alex: онлайн 30 мин; Old: месяц назад
+    async def test_sends_photo_dashboard(self):
+        """Регресс: рендер идёт в другом потоке и не должен трогать SQLite."""
         self.sessions.open_session("Steve", at=msk(2026, 7, 12, 16, 0))
         self.sessions.close_session("Steve", at=msk(2026, 7, 12, 19, 0))
-        self.sessions.open_session("Alex", at=msk(2026, 7, 12, 19, 30))
-        self.sessions.open_session("Old", at=msk(2026, 6, 12, 10, 0))
-        self.sessions.close_session("Old", at=msk(2026, 6, 13, 10, 0))
+        self.freeze_now(msk(2026, 7, 12, 20, 0))
+
+        msg = FakeMessage(1)
+        await commands.cmd_stats(msg, CommandObject(), self.sessions)
+        self.assertEqual(msg.answers, [], "при успешном рендере текст не шлём")
+        (photo, caption), = msg.photos
+        self.assertTrue(photo.data.startswith(b"\x89PNG"))
+        self.assertEqual(photo.filename, "stats.png")
+        self.assertEqual(caption, "📊 Дашборд сервера за 7 дн")
+
+    async def test_render_failure_falls_back_to_text(self):
+        self.sessions.open_session("Steve", at=msk(2026, 7, 12, 16, 0))
+        now = msk(2026, 7, 12, 20, 0)
         self.freeze_now(now)
 
-        msg = FakeMessage(1)
-        await commands.cmd_stats(msg, CommandObject(), self.sessions)
-        self.assertEqual(
-            msg.answers[-1],
-            "📊 Статистика сервера за 7 дн\n"
-            "\n"
-            "Сейчас онлайн: 1\n"
-            "Уникальных игроков: 2\n"
-            "Заходов: 2\n"
-            "Наиграно суммарно: 3 ч 30 мин\n"
-            "Пиковый онлайн: 1 (сегодня в 16:00)\n"
-            "Самый активный: Steve — 3 ч\n"
-            "\n"
-            "За всё время\n"
-            "Уникальных игроков: 3\n"
-            "Наиграно: 1 дн 3 ч\n"
-            "Первая запись: 12 июня в 10:00",
-        )
-
-    async def test_window_without_activity(self):
-        self.sessions.open_session("Old", at=self.NOW - 30 * 86400)
-        self.sessions.close_session("Old", at=self.NOW - 29 * 86400)
-        self.freeze_now(self.NOW)
+        original = commands.charts.render
+        commands.charts.render = lambda data: 1 / 0
+        self.addCleanup(setattr, commands.charts, "render", original)
 
         msg = FakeMessage(1)
         await commands.cmd_stats(msg, CommandObject(), self.sessions)
-        answer = msg.answers[-1]
-        self.assertIn("Уникальных игроков: 0", answer)
-        self.assertNotIn("Пиковый онлайн", answer)
-        self.assertNotIn("Самый активный", answer)
-        self.assertIn("За всё время", answer)
+        self.assertEqual(msg.photos, [])
+        self.assertEqual(msg.answers[-1], reports.server_dashboard(self.sessions, 7, now))
 
-    async def test_empty_history(self):
-        self.freeze_now(self.NOW)
+    async def test_empty_history_answers_with_text(self):
+        self.freeze_now(msk(2026, 7, 12, 20, 0))
         msg = FakeMessage(1)
         await commands.cmd_stats(msg, CommandObject(), self.sessions)
+        self.assertEqual(msg.photos, [])
         self.assertEqual(msg.answers[-1], "Пока нет ни одной записи об игроках.")
 
     async def test_invalid_argument(self):
-        self.freeze_now(self.NOW)
+        self.freeze_now(msk(2026, 7, 12, 20, 0))
         msg = FakeMessage(1)
         for bad in ("abc", "0", "400"):
             await commands.cmd_stats(msg, CommandObject(args=bad), self.sessions)
             self.assertIn("Использование: /stats", msg.answers[-1])
+        self.assertEqual(msg.photos, [])
